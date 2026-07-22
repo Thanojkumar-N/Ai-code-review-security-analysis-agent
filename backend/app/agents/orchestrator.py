@@ -68,6 +68,12 @@ def get_conversation_workflow():
 
 # Nodes for Parallel Orchestrator
 
+def detect_language(code: str) -> str:
+    """Helper to automatically detect the programming language of a source code block."""
+    if "public class " in code or "import java." in code or "System.out.print" in code or "class " in code and ("{" in code or "public" in code or "private" in code):
+        return "java"
+    return "python"
+
 def run_code_analysis(state: ParallelOrchestratorState) -> Dict[str, Any]:
     """Node wrapper for running the Code Analysis Agent with retry logic, logging, and execution timing."""
     start_time = time.time()
@@ -80,11 +86,18 @@ def run_code_analysis(state: ParallelOrchestratorState) -> Dict[str, Any]:
         "error": None
     }
     
+    code = state.get("code", "")
+    language = state.get("language", "")
+    if not language or language.lower() not in ["python", "java"]:
+        language = detect_language(code)
+        
+    local_state = dict(state)
+    local_state["language"] = language
+    
     for attempt in range(retries):
         try:
             logger.info(f"Running Code Analysis Agent (attempt {attempt + 1})")
-            # Call underlying node code analysis logic
-            result = code_analysis_agent_node(state)
+            result = code_analysis_agent_node(local_state)
             
             duration_ms = (time.time() - start_time) * 1000
             agent_status.update({
@@ -125,11 +138,18 @@ def run_security_analysis(state: ParallelOrchestratorState) -> Dict[str, Any]:
         "error": None
     }
     
+    code = state.get("code", "")
+    language = state.get("language", "")
+    if not language or language.lower() not in ["python", "java"]:
+        language = detect_language(code)
+        
+    local_state = dict(state)
+    local_state["language"] = language
+    
     for attempt in range(retries):
         try:
             logger.info(f"Running Security Vulnerability Agent (attempt {attempt + 1})")
-            # Call underlying node security analysis logic
-            result = security_agent_node(state)
+            result = security_agent_node(local_state)
             
             duration_ms = (time.time() - start_time) * 1000
             agent_status.update({
@@ -168,22 +188,56 @@ def run_merge_findings(state: ParallelOrchestratorState) -> Dict[str, Any]:
     analysis_findings = analysis_data.get("quality_findings") or []
     security_findings = security_data.get("vulnerabilities") or []
     
-    # Standardize & track source agent
-    mapped_analysis = []
+    # Merge and standardize source mapping
+    merged_raw = []
     for f in analysis_findings:
         item = dict(f)
         item["source_agent"] = "code_analysis"
-        mapped_analysis.append(item)
+        item["line_number"] = item.get("line_number") or item.get("line") or 1
+        item["line"] = item["line_number"]
+        # Map snake to camel response items
+        item["code_snippet"] = item.get("code_snippet") or item.get("snippet") or ""
+        item["snippet"] = item["code_snippet"]
+        merged_raw.append(item)
         
-    mapped_security = []
     for f in security_findings:
         item = dict(f)
         item["source_agent"] = "security_analysis"
-        mapped_security.append(item)
+        item["line_number"] = item.get("line_number") or item.get("line") or 1
+        item["line"] = item["line_number"]
+        # Map snake/camel security values
+        item["Issue Name"] = item.get("Issue Name") or item.get("issue_name") or item.get("title") or "Security Issue"
+        item["issue_name"] = item["Issue Name"]
+        item["OWASP Category"] = item.get("OWASP Category") or item.get("owasp_category") or item.get("classification") or "OWASP Top 10"
+        item["owasp_category"] = item["OWASP Category"]
+        item["Severity"] = item.get("Severity") or item.get("severity") or "Medium"
+        item["severity"] = item["Severity"]
+        item["Description"] = item.get("Description") or item.get("description") or ""
+        item["description"] = item["Description"]
+        item["Affected File"] = item.get("Affected File") or item.get("affected_file") or "main.py"
+        item["affected_file"] = item["Affected File"]
+        item["Line Number"] = item["line_number"]
+        item["Code Snippet"] = item.get("Code Snippet") or item.get("code_snippet") or item.get("snippet") or ""
+        item["code_snippet"] = item["Code Snippet"]
+        item["snippet"] = item["Code Snippet"]
+        item["Risk Explanation"] = item.get("Risk Explanation") or item.get("risk_explanation") or ""
+        item["risk_explanation"] = item["Risk Explanation"]
+        item["Recommended Fix"] = item.get("Recommended Fix") or item.get("recommended_fix") or item.get("recommendation") or ""
+        item["recommended_fix"] = item["Recommended Fix"]
+        item["Corrected Code Example"] = item.get("Corrected Code Example") or item.get("corrected_code_example") or item.get("corrected_code") or ""
+        item["corrected_code_example"] = item["Corrected Code Example"]
+        merged_raw.append(item)
         
-    merged = mapped_analysis + mapped_security
-    
-    # Severity sorting: Critical > High > Medium > Low > Info > Unknown
+    # De-duplicate: Keep first finding if multiple share same line, and code smell category / vulnerability title
+    seen = set()
+    de_duplicated = []
+    for f in merged_raw:
+        key = (f.get("line_number"), f.get("id") or f.get("title") or f.get("issue_name") or "")
+        if key not in seen:
+            seen.add(key)
+            de_duplicated.append(f)
+            
+    # Sort by severity priority: Critical > High > Medium > Low > Info
     SEVERITY_ORDER = {
         "critical": 0,
         "high": 1,
@@ -197,33 +251,52 @@ def run_merge_findings(state: ParallelOrchestratorState) -> Dict[str, Any]:
         sev = f.get("severity") or f.get("Severity") or "unknown"
         return SEVERITY_ORDER.get(str(sev).lower(), 5)
         
-    def get_line_number(f):
-        return f.get("line_number") or f.get("line") or 0
-        
-    # Sort primarily by severity priority, secondarily by line number
-    merged.sort(key=lambda x: (get_severity_rank(x), get_line_number(x)))
+    de_duplicated.sort(key=lambda x: (get_severity_rank(x), x.get("line_number", 0)))
     
+    # Calculate counts by severity
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for f in de_duplicated:
+        sev = str(f.get("severity") or "").lower()
+        if sev in counts:
+            counts[sev] += 1
+            
+    # Compute overall score
+    deductions = counts["critical"] * 25 + counts["high"] * 15 + counts["medium"] * 5 + counts["low"] * 2
+    overall_score = max(0, 100 - deductions)
+    
+    # Collect unique recommendations
+    recommendations = []
+    for f in de_duplicated:
+        rec = f.get("recommendation") or f.get("recommended_fix") or ""
+        if rec and rec not in recommendations:
+            recommendations.append(rec)
+            
     total_time_ms = (time.time() - start_time) * 1000
-    
-    status_ca = state.get("status_code_analysis") or {}
-    status_sec = state.get("status_security_analysis") or {}
     
     summary = {
         "total_execution_time_ms": round(total_time_ms, 2),
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "total_findings": len(merged),
-        "analysis_findings_count": len(mapped_analysis),
-        "security_findings_count": len(mapped_security),
+        "total_findings": len(de_duplicated),
+        "analysis_findings_count": sum(1 for f in de_duplicated if f["source_agent"] == "code_analysis"),
+        "security_findings_count": sum(1 for f in de_duplicated if f["source_agent"] == "security_analysis"),
+        "severity_summary": counts,
+        "overall_score": overall_score,
         "agent_status": {
-            "code_analysis": status_ca,
-            "security_analysis": status_sec
+            "code_analysis": state.get("status_code_analysis") or {},
+            "security_analysis": state.get("status_security_analysis") or {}
         }
     }
     
+    de_dup_analysis = [f for f in de_duplicated if f["source_agent"] == "code_analysis"]
+    de_dup_security = [f for f in de_duplicated if f["source_agent"] == "security_analysis"]
+    
     return {
-        "analysis_findings": mapped_analysis,
-        "security_findings": mapped_security,
-        "merged_findings": merged,
+        "analysis_findings": de_dup_analysis,
+        "code_analysis_findings": de_dup_analysis,
+        "security_findings": de_dup_security,
+        "merged_findings": de_duplicated,
+        "overall_score": overall_score,
+        "recommendations": recommendations[:5],
         "summary": summary
     }
 

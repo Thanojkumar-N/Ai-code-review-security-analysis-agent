@@ -1,7 +1,131 @@
 import re
+import os
+import json
+import subprocess
+import tempfile
+import logging
+import httpx
 from abc import ABC, abstractmethod
 from typing import Dict, List, Type, Any, Optional
 from backend.app.agents.state import AgentState
+
+logger = logging.getLogger(__name__)
+
+def normalize_severity(sev: str) -> str:
+    sev_lower = str(sev).lower()
+    if "critical" in sev_lower:
+        return "Critical"
+    elif "high" in sev_lower or "error" in sev_lower:
+        return "High"
+    elif "medium" in sev_lower or "warning" in sev_lower or "warn" in sev_lower:
+        return "Medium"
+    elif "low" in sev_lower:
+        return "Low"
+    elif "info" in sev_lower:
+        return "Info"
+    return "Medium"
+
+def run_cli_scanners(code: str, language: str, filename: str) -> List[Dict[str, Any]]:
+    findings = []
+    
+    # Use workspace relative uploads/temp_scans folder
+    temp_dir = os.path.abspath("./uploads/temp_scans")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    temp_filepath = os.path.join(temp_dir, filename)
+    try:
+        with open(temp_filepath, "w", encoding="utf-8") as f:
+            f.write(code)
+            
+        env = os.environ.copy()
+        # Add Scripts folder where bandit/semgrep were installed
+        scripts_path = r"C:\Users\thano\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\Scripts"
+        if scripts_path not in env.get("PATH", ""):
+            env["PATH"] = env.get("PATH", "") + os.pathsep + scripts_path
+            
+        # Determine paths to executables to avoid WinError 2 on Windows
+        bandit_exe = r"C:\Users\thano\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\Scripts\bandit.exe"
+        semgrep_exe = r"C:\Users\thano\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\Scripts\semgrep.exe"
+        
+        bandit_cmd = bandit_exe if os.path.exists(bandit_exe) else "bandit"
+        semgrep_cmd = semgrep_exe if os.path.exists(semgrep_exe) else "semgrep"
+
+        # 1. Run Bandit (Python only)
+        if language == "python":
+            try:
+                cmd = [bandit_cmd, "-f", "json", "-q", temp_filepath]
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=env)
+                if proc.stdout:
+                    try:
+                        bandit_data = json.loads(proc.stdout)
+                        for issue in bandit_data.get("results", []):
+                            line_num = issue.get("line_number", 1)
+                            snippet = issue.get("code", "").strip()
+                            findings.append({
+                                "id": f"SEC-BANDIT-{issue.get('test_id')}",
+                                "line": line_num,
+                                "line_number": line_num,
+                                "title": issue.get("issue_text", "Bandit Finding"),
+                                "severity": normalize_severity(issue.get("issue_severity", "Medium")),
+                                "classification": "OWASP Top 10",
+                                "cwe": f"CWE-{issue.get('cwe', {}).get('id', 'Unknown')}",
+                                "confidence": issue.get("issue_confidence", "Medium").capitalize(),
+                                "description": issue.get("issue_text", ""),
+                                "affected_file": filename,
+                                "code_snippet": snippet,
+                                "snippet": snippet,
+                                "risk_explanation": f"Detected by Bandit: {issue.get('issue_text')}. Confidence: {issue.get('issue_confidence')}.",
+                                "recommendation": "Review the flagged code and replace it with a secure coding standard implementation.",
+                                "corrected_code": ""
+                            })
+                    except Exception as e_json:
+                        logger.warning(f"Failed to parse Bandit JSON output: {e_json}")
+            except Exception as ex:
+                logger.warning(f"Failed to execute Bandit: {ex}")
+
+        # 2. Run Semgrep (Python and Java)
+        try:
+            cmd = [semgrep_cmd, "--config=auto", "--json", temp_filepath]
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=env)
+            if proc.stdout:
+                try:
+                    semgrep_data = json.loads(proc.stdout)
+                    for result in semgrep_data.get("results", []):
+                        line_num = result.get("start", {}).get("line", 1)
+                        snippet = result.get("extra", {}).get("lines", "").strip()
+                        metadata = result.get("extra", {}).get("metadata", {})
+                        cwe = metadata.get("cwe", ["CWE-Unknown"])[0] if metadata.get("cwe") else "CWE-Unknown"
+                        owasp = metadata.get("owasp", ["OWASP Top 10"])[0] if metadata.get("owasp") else "OWASP Top 10"
+                        findings.append({
+                            "id": f"SEC-SEMGREP-{result.get('check_id').split('.')[-1]}",
+                            "line": line_num,
+                            "line_number": line_num,
+                            "title": result.get("extra", {}).get("message", "Semgrep Finding").split(".")[0],
+                            "severity": normalize_severity(result.get("extra", {}).get("severity", "Medium")),
+                            "classification": owasp,
+                            "cwe": cwe,
+                            "confidence": "High",
+                            "description": result.get("extra", {}).get("message", ""),
+                            "affected_file": filename,
+                            "code_snippet": snippet,
+                            "snippet": snippet,
+                            "risk_explanation": f"Detected by Semgrep rule: {result.get('check_id')}.",
+                            "recommendation": "Review and refactor the flagged statement to adhere to secure patterns.",
+                            "corrected_code": ""
+                        })
+                except Exception as e_json:
+                    logger.warning(f"Failed to parse Semgrep JSON output: {e_json}")
+        except Exception as ex:
+            logger.warning(f"Failed to execute Semgrep: {ex}")
+            
+    finally:
+        if os.path.exists(temp_filepath):
+            try:
+                os.remove(temp_filepath)
+            except Exception:
+                pass
+                
+    return findings
 
 # ==========================================
 # Abstract Base and Registry for expansion
@@ -345,6 +469,11 @@ class PythonScanner(BaseLanguageScanner):
                         "Corrected Code Example": rule["corrected_code"],
                         "corrected_code_example": rule["corrected_code"]
                     })
+        try:
+            cli_findings = run_cli_scanners(code, "python", affected_file)
+            vulnerabilities.extend(cli_findings)
+        except Exception as cli_ex:
+            logger.warning(f"Error executing python CLI scanners: {cli_ex}")
         return vulnerabilities
 
 
@@ -657,14 +786,109 @@ class JavaScanner(BaseLanguageScanner):
                         "Recommended Fix": rule["recommendation"],
                         "recommended_fix": rule["recommendation"],
                         "Corrected Code Example": rule["corrected_code"],
-                        "corrected_code_example": rule["corrected_code"]
                     })
+        try:
+            cli_findings = run_cli_scanners(code, "java", affected_file)
+            vulnerabilities.extend(cli_findings)
+        except Exception as cli_ex:
+            logger.warning(f"Error executing java CLI scanners: {cli_ex}")
         return vulnerabilities
 
 
 # Register core scanners in the registry
 ScannerRegistry.register("python", PythonScanner)
 ScannerRegistry.register("java", JavaScanner)
+
+def validate_findings_with_llm(code: str, vulnerabilities: List[Dict[str, Any]], language: str) -> List[Dict[str, Any]]:
+    from backend.app.config.config import settings
+    if not settings.OPENAI_API_KEY:
+        logger.info("OPENAI_API_KEY is not configured. Skipping LLM validation layer and proceeding with static findings.")
+        return vulnerabilities
+        
+    logger.info(f"Invoking LLM validation layer on {len(vulnerabilities)} vulnerabilities...")
+    
+    prompt = f"""
+    You are an expert Security Engineer. Review the following code and validate the static analysis findings detected.
+    
+    Source Code ({language}):
+    ```
+    {code}
+    ```
+    
+    Detected Findings:
+    {json.dumps([{
+        "id": v.get("id"),
+        "line": v.get("line"),
+        "title": v.get("title"),
+        "description": v.get("description"),
+        "severity": v.get("severity")
+    } for v in vulnerabilities], indent=2)}
+    
+    For each finding:
+    1. Determine if it is a False Positive (True or False).
+    2. Assess the correct severity (Low, Medium, High, Critical).
+    3. Update the confidence score (Low, Medium, High).
+    4. Provide a brief explanation of your decision.
+    
+    Format your response as a JSON array of objects matching this exact structure:
+    [
+        {{
+            "id": "finding_id_here",
+            "line": 10,
+            "is_false_positive": false,
+            "severity": "High",
+            "confidence": "High",
+            "explanation": "Brief explanation"
+        }}
+    ]
+    """
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a secure code analysis validation agent. Output strictly valid JSON arrays without markdown wrappers."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.0
+        }
+        
+        response = httpx.post(f"{settings.OPENAI_API_BASE}/chat/completions", json=payload, headers=headers, timeout=20.0)
+        if response.status_code == 200:
+            resp_data = response.json()
+            llm_text = resp_data["choices"][0]["message"]["content"].strip()
+            
+            if llm_text.startswith("```"):
+                llm_text = re.sub(r"^```(?:json)?\n", "", llm_text)
+                llm_text = re.sub(r"\n```$", "", llm_text)
+                llm_text = llm_text.strip()
+                
+            validations = json.loads(llm_text)
+            validated_vulns = []
+            
+            for vuln in vulnerabilities:
+                match = next((val for val in validations if val.get("id") == vuln.get("id") and val.get("line") == vuln.get("line")), None)
+                if match:
+                    if match.get("is_false_positive", False):
+                        logger.info(f"LLM flagged finding {vuln.get('id')} at line {vuln.get('line')} as a False Positive.")
+                        continue
+                        
+                    vuln["severity"] = match.get("severity", vuln.get("severity"))
+                    vuln["Severity"] = vuln["severity"]
+                    vuln["confidence"] = match.get("confidence", vuln.get("confidence", "High"))
+                    vuln["risk_explanation"] = vuln.get("risk_explanation", "") + f"\nLLM Validation Note: {match.get('explanation', '')}"
+                    
+                validated_vulns.append(vuln)
+                
+            return validated_vulns
+    except Exception as e:
+        logger.error(f"Error during LLM validation: {e}. Falling back to default static findings.")
+        
+    return vulnerabilities
 
 # ==========================================
 # Orchestrator Node Function
@@ -675,18 +899,15 @@ def security_agent_node(state: AgentState) -> dict:
     code = state.get("code", "")
     language = state.get("language", "python").lower()
     
-    # 1. Fetch scanner class from register
     scanner = ScannerRegistry.get_scanner(language)
     if not scanner:
-        # Fallback to python if language registry is empty
         scanner = ScannerRegistry.get_scanner("python")
 
-    # 2. Execute scanning filters
     vulnerabilities = []
     if scanner:
-        # Check if there is an affected file in the state or default it
         filename = "main.py" if language == "python" else "Main.java"
         vulnerabilities = scanner.scan_code(code, filename=filename)
+        vulnerabilities = validate_findings_with_llm(code, vulnerabilities, language)
 
     # 3. Compile severity summaries
     severities = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}

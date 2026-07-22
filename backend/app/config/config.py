@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     API_V1_PREFIX: str = "/api/v1"
 
+    # OpenAI / LLM Settings
+    OPENAI_API_KEY: str = ""
+    OPENAI_API_BASE: str = "https://api.openai.com/v1"
+
     # JWT Settings
     JWT_SECRET_KEY: str = "45c08fa5efef4772b22bbcb9ef21516e91cb3cbb42a0b1b1a7d65b79658bd781"
     JWT_ALGORITHM: str = "HS256"

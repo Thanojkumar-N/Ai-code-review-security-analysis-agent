@@ -721,10 +721,652 @@ def analyze_python_ast(code: str) -> list:
                     "recommendation": "Throw subclassed custom Exceptions or specific built-in Exceptions (e.g. ValueError)."
                 })
 
+    # 7. Add Unused Imports, Lazy Class, Data Class, High Branching, Excessive Loops, Spaghetti Code, Shotgun Surgery, Circular Dependencies
+    # 7.1 Unused Imports
+    imported_names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imported_names[name] = (node.lineno, alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imported_names[name] = (node.lineno, f"{node.module}.{alias.name}" if node.module else alias.name)
+    
+    used_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used_names.add(node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            used_names.add(node.value.id)
+            
+    for name, (line_num, full_path) in imported_names.items():
+        if name not in used_names and not name.startswith("_"):
+            findings.append({
+                "id": "QLY-011",
+                "title": "Unused Import",
+                "description": f"Imported module/name '{full_path}' is never referenced.",
+                "language": "python",
+                "severity": "Low",
+                "category": "Poor Coding Practice",
+                "line_number": line_num,
+                "line": line_num,
+                "code_snippet": f"import {full_path}" if "import" not in full_path else full_path,
+                "snippet": f"import {full_path}" if "import" not in full_path else full_path,
+                "explanation": "Unused imports clutter dependency scopes.",
+                "recommendation": "Remove the unused import statement."
+            })
+
+    # 7.2 Lazy Class & Data Class
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            start_line = node.lineno
+            end_line = getattr(node, "end_lineno", start_line)
+            class_len = end_line - start_line + 1
+            methods_in_class = [n for n in node.body if isinstance(n, ast.FunctionDef)]
+            
+            # Lazy Class (< 2 methods and < 30 lines)
+            if len(methods_in_class) < 2 and class_len < 30:
+                findings.append({
+                    "id": "QLY-016",
+                    "title": "Lazy Class Smell",
+                    "description": f"Class '{node.name}' is too small to be useful ({class_len} lines, {len(methods_in_class)} methods).",
+                    "language": "python",
+                    "severity": "Low",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": f"class {node.name}:",
+                    "snippet": f"class {node.name}:",
+                    "explanation": f"Class '{node.name}' does too little work to justify its existence as a separate class.",
+                    "recommendation": "Incorporate this class's limited responsibilities into its caller or merge it with another class."
+                })
+                
+            # Data Class (only fields/properties/init methods)
+            is_data_class = True
+            other_methods = 0
+            for m in methods_in_class:
+                if m.name != "__init__":
+                    is_accessor = False
+                    if len(m.body) == 1:
+                        stmt = m.body[0]
+                        if isinstance(stmt, ast.Return):
+                            is_accessor = True
+                        elif isinstance(stmt, ast.Assign) or isinstance(stmt, ast.AnnAssign):
+                            is_accessor = True
+                    if not is_accessor:
+                        other_methods += 1
+            if len(methods_in_class) > 0 and other_methods == 0:
+                findings.append({
+                    "id": "QLY-017",
+                    "title": "Data Class Smell",
+                    "description": f"Class '{node.name}' only stores data (no behavior methods).",
+                    "language": "python",
+                    "severity": "Low",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": f"class {node.name}:",
+                    "snippet": f"class {node.name}:",
+                    "explanation": f"Class '{node.name}' acts only as a data holder without operations behaviors, violating OOP principles.",
+                    "recommendation": "Refactor logic to move operations and behavior concerning this data into this class."
+                })
+
+            # Check Spaghetti Code (high complexity, nesting > 3, line count > 200)
+            class_complexity = sum(
+                1 for child in ast.walk(node)
+                if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler, ast.And, ast.Or))
+            )
+            max_nesting = 0
+            def get_max_nest(n, current=0):
+                nonlocal max_nesting
+                if isinstance(n, (ast.If, ast.For, ast.While, ast.Try)):
+                    current += 1
+                    max_nesting = max(max_nesting, current)
+                for c in ast.iter_child_nodes(n):
+                    get_max_nest(c, current)
+            get_max_nest(node)
+            if class_len > 200 and class_complexity > 15 and max_nesting > 3:
+                findings.append({
+                    "id": "QLY-DSGN-006",
+                    "title": "Spaghetti Code Anti-Pattern",
+                    "description": f"Class '{node.name}' has complex control flow paths, deep nesting, and high line count.",
+                    "language": "python",
+                    "severity": "High",
+                    "category": "Design Anti-Pattern",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": f"class {node.name}:",
+                    "snippet": f"class {node.name}:",
+                    "explanation": "Spaghetti code features convoluted control structures, lack of clear class structure, and excessive size, making it extremely hard to maintain.",
+                    "recommendation": "Flatten structural nesting, extract modular functions, and separate classes."
+                })
+
+        elif isinstance(node, ast.FunctionDef):
+            start_line = node.lineno
+            end_line = getattr(node, "end_lineno", start_line)
+            
+            # 7.3 High Branching (> 8 branches)
+            branch_count = sum(1 for child in ast.walk(node) if isinstance(child, (ast.If, ast.ExceptHandler, ast.Try)))
+            if branch_count > 8:
+                findings.append({
+                    "id": "QLY-COMP-005",
+                    "title": "High Branching Complexity",
+                    "description": f"Method '{node.name}' has {branch_count} branching decision paths.",
+                    "language": "python",
+                    "severity": "Medium",
+                    "category": "Complexity",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": f"def {node.name}(...):",
+                    "snippet": f"def {node.name}(...):",
+                    "explanation": f"Having {branch_count} branches raises cyclomatic pathways, making coverage test designs difficult.",
+                    "recommendation": "Use switch/lookup dictionary tables or split paths into subclasses."
+                })
+
+            # 7.4 Excessive Loops (> 2 loops)
+            loop_count = sum(1 for child in ast.walk(node) if isinstance(child, (ast.For, ast.While)))
+            if loop_count > 2:
+                findings.append({
+                    "id": "QLY-COMP-006",
+                    "title": "Excessive Loops",
+                    "description": f"Method '{node.name}' contains {loop_count} loop blocks.",
+                    "language": "python",
+                    "severity": "Medium",
+                    "category": "Complexity",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": f"def {node.name}(...):",
+                    "snippet": f"def {node.name}(...):",
+                    "explanation": f"Multiple loops indicate high execution nesting and resource overhead.",
+                    "recommendation": "Optimize loops or extract loop logic to separate methods."
+                })
+
+            # 7.5 Shotgun Surgery
+            external_obj_fields = {}
+            for child in ast.walk(node):
+                if isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name):
+                    obj_name = child.value.id
+                    if obj_name != "self":
+                        if obj_name not in external_obj_fields:
+                            external_obj_fields[obj_name] = set()
+                        external_obj_fields[obj_name].add(child.attr)
+            
+            highly_coupled_objs = sum(1 for obj, fields in external_obj_fields.items() if len(fields) >= 2)
+            if highly_coupled_objs >= 3:
+                findings.append({
+                    "id": "QLY-DSGN-007",
+                    "title": "Shotgun Surgery Design Anti-Pattern",
+                    "description": f"Method '{node.name}' relies heavily on internal fields of multiple external classes.",
+                    "language": "python",
+                    "severity": "High",
+                    "category": "Design Anti-Pattern",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(node)[:150],
+                    "snippet": get_snippet(node)[:150],
+                    "explanation": "If a single method must access internals of multiple external classes, making a single change in those classes will require modifying this method too, signaling high coupling.",
+                    "recommendation": "Use parameter wrappers, consolidate classes, or delegate responsibility methods."
+                })
+
+    # 7.6 Circular Dependencies
+    local_imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level and node.level > 0:
+            local_imports.append((node.lineno, node.module or ""))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("."):
+                    local_imports.append((node.lineno, alias.name))
+    for line_num, mod in local_imports:
+        if mod == "" or mod.endswith("main") or mod == "app":
+            findings.append({
+                "id": "QLY-DSGN-008",
+                "title": "Circular Dependency Risk",
+                "description": "Detected local relative import path that may introduce circular dependency cycles.",
+                "language": "python",
+                "severity": "Medium",
+                "category": "Design Anti-Pattern",
+                "line_number": line_num,
+                "line": line_num,
+                "code_snippet": f"from {mod} import ...",
+                "snippet": f"from {mod} import ...",
+                "explanation": "Circular dependencies couple packages together tightly, leading to initialization failures and hard-to-maintain modules.",
+                "recommendation": "Extract interface classes or common base modules to break cycles."
+            })
+
+    return findings
+
+def analyze_java_ast(code: str) -> list:
+    import javalang
+    findings = []
+    lines = code.split("\n")
+    
+    try:
+        tree = javalang.parse.parse(code)
+    except Exception as e:
+        raise e
+
+    def get_node_line_span(node):
+        start_line = node.position.line if (hasattr(node, "position") and node.position) else 1
+        max_line = start_line
+        
+        if hasattr(node, "children"):
+            for child in node.children:
+                if isinstance(child, list):
+                    for item in child:
+                        if hasattr(item, "position") and item.position:
+                            max_line = max(max_line, item.position.line)
+                        max_line = max(max_line, get_node_line_span(item)[1])
+                elif hasattr(child, "position") and child.position:
+                    max_line = max(max_line, child.position.line)
+                    max_line = max(max_line, get_node_line_span(child)[1])
+        return start_line, max_line
+
+    def get_snippet(start_line, end_line) -> str:
+        try:
+            return "\n".join(lines[start_line - 1:end_line]).strip()
+        except Exception:
+            return ""
+
+    # Duplication check (3 consecutive clean lines)
+    clean_lines = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("//") and not stripped.startswith("/*") and not stripped.startswith("*"):
+            clean_lines.append((idx + 1, stripped))
+    
+    duplicates = set()
+    for i in range(len(clean_lines) - 2):
+        seq = (clean_lines[i][1], clean_lines[i+1][1], clean_lines[i+2][1])
+        for j in range(i + 3, len(clean_lines) - 2):
+            other_seq = (clean_lines[j][1], clean_lines[j+1][1], clean_lines[j+2][1])
+            if seq == other_seq:
+                duplicates.add((clean_lines[i][0], clean_lines[j][0]))
+                
+    for line_a, line_b in sorted(duplicates)[:5]:
+        findings.append({
+            "id": "QLY-015",
+            "title": "Duplicate Code Block",
+            "description": f"Identical logic duplicate sequences starting at line {line_a} and line {line_b}.",
+            "language": "java",
+            "severity": "Medium",
+            "category": "Code Smell",
+            "line_number": line_a,
+            "line": line_a,
+            "code_snippet": "\n".join(lines[line_a - 1 : line_a + 2]),
+            "snippet": "\n".join(lines[line_a - 1 : line_a + 2]),
+            "explanation": "Java code duplication is a violation of DRY (Don't Repeat Yourself) guidelines, increasing maintenance overhead.",
+            "recommendation": "Extract common logic into separate helper methods."
+        })
+
+    for path, node in tree:
+        # A. Class Checks
+        if isinstance(node, javalang.tree.ClassDeclaration):
+            start_line, end_line = get_node_line_span(node)
+            class_len = end_line - start_line + 1
+            methods = [decl for decl in node.body if isinstance(decl, javalang.tree.MethodDeclaration)]
+            fields = [decl for decl in node.body if isinstance(decl, javalang.tree.FieldDeclaration)]
+            
+            # i. Large Class (> 150 lines or > 10 methods)
+            if class_len > 150 or len(methods) > 10:
+                findings.append({
+                    "id": "QLY-004",
+                    "title": "Large Class Smell",
+                    "description": f"Class '{node.name}' is too large ({class_len} lines, {len(methods)} methods).",
+                    "language": "java",
+                    "severity": "High",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, start_line + 1),
+                    "snippet": get_snippet(start_line, start_line + 1),
+                    "explanation": f"Class '{node.name}' contains {class_len} lines or {len(methods)} methods, indicating too many responsibilities.",
+                    "recommendation": "Split class into smaller components where attributes and methods share unified scopes."
+                })
+            
+            # ii. Lazy Class (< 2 methods and < 30 lines)
+            if len(methods) < 2 and class_len < 30:
+                findings.append({
+                    "id": "QLY-016",
+                    "title": "Lazy Class Smell",
+                    "description": f"Class '{node.name}' is a Lazy Class (only {len(methods)} methods and {class_len} lines).",
+                    "language": "java",
+                    "severity": "Low",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, start_line + 1),
+                    "snippet": get_snippet(start_line, start_line + 1),
+                    "explanation": f"Class '{node.name}' does too little work to justify its existence as a separate class.",
+                    "recommendation": "Incorporate this class's limited responsibilities into its caller or merge it with another class."
+                })
+
+            # iii. Data Class (only fields/getters/setters)
+            is_data_class = True
+            for m in methods:
+                name_lower = m.name.lower()
+                if not (name_lower.startswith("get") or name_lower.startswith("set") or name_lower in ["tostring", "equals", "hashcode"]):
+                    is_data_class = False
+                    break
+            if len(fields) > 0 and len(methods) > 0 and is_data_class:
+                findings.append({
+                    "id": "QLY-017",
+                    "title": "Data Class Smell",
+                    "description": f"Class '{node.name}' is a Data Class (only contains fields, getters, and setters).",
+                    "language": "java",
+                    "severity": "Low",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, start_line + 1),
+                    "snippet": get_snippet(start_line, start_line + 1),
+                    "explanation": f"Class '{node.name}' only stores data and lacks behavior logic, violating object-oriented encapsulation principles.",
+                    "recommendation": "Move behavior/business logic methods that operate on this data into this class."
+                })
+
+            # iv. God Class (monolithic class)
+            class_complexity = 0
+            for path_child, child in node:
+                if isinstance(child, (javalang.tree.IfStatement, javalang.tree.ForStatement, javalang.tree.WhileStatement, javalang.tree.DoStatement, javalang.tree.SwitchStatementCase)):
+                    class_complexity += 1
+            if class_len > 250 and class_complexity > 20:
+                findings.append({
+                    "id": "QLY-DSGN-004",
+                    "title": "God Object Violation",
+                    "description": f"Class '{node.name}' acts as a God Class ({class_len} lines, complexity {class_complexity}).",
+                    "language": "java",
+                    "severity": "Critical",
+                    "category": "Design Problem",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, start_line + 1),
+                    "snippet": get_snippet(start_line, start_line + 1),
+                    "explanation": "A God Class controls too many aspects of the application, concentrating logic into a single monolithic class.",
+                    "recommendation": "Refactor the class to distribute tasks to other auxiliary objects."
+                })
+
+            # v. Missing docstring for public class
+            if "public" in node.modifiers and not node.documentation:
+                findings.append({
+                    "id": "QLY-BP-001",
+                    "title": "Missing Documentation",
+                    "description": f"Class '{node.name}' lacks javadoc documentation.",
+                    "language": "java",
+                    "severity": "Low",
+                    "category": "Coding Best Practice",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, start_line + 1),
+                    "snippet": get_snippet(start_line, start_line + 1),
+                    "explanation": "Missing class Javadoc reduces readability and codebase understandability.",
+                    "recommendation": "Add a descriptive Javadoc block at the top of the class definition."
+                })
+
+        # B. Method Checks
+        elif isinstance(node, javalang.tree.MethodDeclaration):
+            start_line, end_line = get_node_line_span(node)
+            method_len = end_line - start_line + 1
+            
+            # i. Long Method (> 50 lines)
+            if method_len > 50:
+                findings.append({
+                    "id": "QLY-001",
+                    "title": "Long Method Smell",
+                    "description": f"Method '{node.name}' is too long ({method_len} lines). It should be refactored into smaller, single-purpose functions.",
+                    "language": "java",
+                    "severity": "Medium",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, min(end_line, start_line + 3)),
+                    "snippet": get_snippet(start_line, min(end_line, start_line + 3)),
+                    "explanation": f"Method '{node.name}' spans {method_len} lines. Extremely long methods suffer from low cohesion and are difficult to read and unit test.",
+                    "recommendation": "Extract logical sub-steps of the method body into smaller helper methods."
+                })
+
+            # ii. Long Parameter List (> 4 parameters)
+            param_count = len(node.parameters)
+            if param_count > 4:
+                findings.append({
+                    "id": "QLY-002",
+                    "title": "Too Many Method Parameters",
+                    "description": f"Method '{node.name}' accepts {param_count} parameters (limit is 4).",
+                    "language": "java",
+                    "severity": "Medium",
+                    "category": "Code Smell",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, start_line),
+                    "snippet": get_snippet(start_line, start_line),
+                    "explanation": f"A parameter count of {param_count} makes the method signature difficult to understand and increases coupling with caller code.",
+                    "recommendation": "Introduce a parameter object/class or extract logical segments of the method."
+                })
+
+            # iii. Cyclomatic Complexity (> 10)
+            decision_points = 0
+            for path_child, child in node:
+                if isinstance(child, (javalang.tree.IfStatement, javalang.tree.ForStatement, javalang.tree.WhileStatement, javalang.tree.DoStatement, javalang.tree.SwitchStatementCase, javalang.tree.CatchClause)):
+                    decision_points += 1
+            cyclomatic = decision_points + 1
+            if cyclomatic > 10:
+                findings.append({
+                    "id": "QLY-COMP-001",
+                    "title": "High Cyclomatic Complexity",
+                    "description": f"Method '{node.name}' has a cyclomatic complexity score of {cyclomatic}, exceeding the recommended limit of 10.",
+                    "language": "java",
+                    "severity": "Medium",
+                    "category": "Complexity",
+                    "line_number": start_line,
+                    "line": start_line,
+                    "code_snippet": get_snippet(start_line, min(end_line, start_line + 2)),
+                    "snippet": get_snippet(start_line, min(end_line, start_line + 2)),
+                    "explanation": f"The complexity score of {cyclomatic} indicates many conditional execution paths, which makes testing and debugging more challenging.",
+                    "recommendation": "Simplify complex conditionals and extract control branches into smaller, dedicated sub-methods."
+                })
+
+            # iv. Unused Local Variables
+            local_vars = {}
+            member_refs = set()
+            for path_child, child in node:
+                if isinstance(child, javalang.tree.LocalVariableDeclaration):
+                    for decl in child.declarators:
+                        line = child.position.line if child.position else start_line
+                        local_vars[decl.name] = line
+                elif isinstance(child, javalang.tree.MemberReference):
+                    member_refs.add(child.member)
+            
+            for var_name, line in local_vars.items():
+                if var_name not in member_refs and var_name not in ["i", "j", "k", "x", "y", "z"]:
+                    findings.append({
+                        "id": "QLY-003",
+                        "title": "Unused Local Variable",
+                        "description": f"Variable '{var_name}' is declared but never referenced or read.",
+                        "language": "java",
+                        "severity": "Low",
+                        "category": "Code Smell",
+                        "line_number": line,
+                        "line": line,
+                        "code_snippet": f"Type {var_name} = ...",
+                        "snippet": f"Type {var_name} = ...",
+                        "explanation": f"Variable '{var_name}' was initialized but is never read or referenced, cluttering scope.",
+                        "recommendation": "Remove the unused local variable declaration."
+                    })
+
+            # v. Empty catch block
+            for path_child, child in node:
+                if isinstance(child, javalang.tree.CatchClause):
+                    is_empty = False
+                    if not child.block:
+                        is_empty = True
+                    elif len(child.block) == 0:
+                        is_empty = True
+                    if is_empty:
+                        line = child.position.line if child.position else start_line
+                        findings.append({
+                            "id": "QLY-010",
+                            "title": "Empty Except Block (Exception Swallowing)",
+                            "description": "Detected an empty catch block swallowing all exceptions.",
+                            "language": "java",
+                            "severity": "High",
+                            "category": "Code Smell",
+                            "line_number": line,
+                            "line": line,
+                            "code_snippet": "catch (Exception e) {}",
+                            "snippet": "catch (Exception e) {}",
+                            "explanation": "Silently swallowing exception blocks hides runtime failures, making operations unstable and hard to troubleshoot.",
+                            "recommendation": "Add exception logging or re-raise the caught error."
+                        })
+
+        # C. Statement Checks
+        elif isinstance(node, (javalang.tree.IfStatement, javalang.tree.ForStatement, javalang.tree.WhileStatement)):
+            nest_depth = len([p for p in path if isinstance(p, (javalang.tree.IfStatement, javalang.tree.ForStatement, javalang.tree.WhileStatement, javalang.tree.TryStatement))])
+            if nest_depth > 3:
+                line = node.position.line if node.position else 1
+                findings.append({
+                    "id": "QLY-006",
+                    "title": "Deeply Nested Control Flow Blocks",
+                    "description": f"Detected nesting depth of {nest_depth} levels (limit is 3).",
+                    "language": "java",
+                    "severity": "Medium",
+                    "category": "Code Smell",
+                    "line_number": line,
+                    "line": line,
+                    "code_snippet": get_snippet(line, line),
+                    "snippet": get_snippet(line, line),
+                    "explanation": "Highly nested code makes parsing execution logic difficult and prone to errors.",
+                    "recommendation": "Refactor nesting layers by writing separate helper methods or returning early using guard clauses."
+                })
+
+            if isinstance(node, (javalang.tree.ForStatement, javalang.tree.WhileStatement)):
+                loop_nest = len([p for p in path if isinstance(p, (javalang.tree.ForStatement, javalang.tree.WhileStatement))])
+                if loop_nest > 0:
+                    line = node.position.line if node.position else 1
+                    findings.append({
+                        "id": "QLY-COMP-003",
+                        "title": "Nested Loop Complexity",
+                        "description": "Loop is nested inside another loop.",
+                        "language": "java",
+                        "severity": "Medium",
+                        "category": "Complexity",
+                        "line_number": line,
+                        "line": line,
+                        "code_snippet": get_snippet(line, line),
+                        "snippet": get_snippet(line, line),
+                        "explanation": "Nested loops increase worst-case runtime complexity and make tracking indexes error-prone.",
+                        "recommendation": "Extract inner loop logic, or replace loop matching with dict/set lookups."
+                    })
+
+            if isinstance(node, javalang.tree.IfStatement):
+                cond_nest = len([p for p in path if isinstance(p, javalang.tree.IfStatement)])
+                if cond_nest > 0:
+                    line = node.position.line if node.position else 1
+                    findings.append({
+                        "id": "QLY-COMP-004",
+                        "title": "Nested Conditions Complexity",
+                        "description": "Conditional statement nested inside another conditional branch.",
+                        "language": "java",
+                        "severity": "Medium",
+                        "category": "Complexity",
+                        "line_number": line,
+                        "line": line,
+                        "code_snippet": get_snippet(line, line),
+                        "snippet": get_snippet(line, line),
+                        "explanation": "Nested conditions decrease readability and should be combined using boolean operations.",
+                        "recommendation": "Use guard clauses (return early) or combine boolean checks."
+                    })
+
+        # D. Literal Checks
+        elif isinstance(node, javalang.tree.Literal):
+            try:
+                val = node.value
+                if val.isdigit() or (val.replace('.', '', 1).isdigit() and '.' in val):
+                    num = float(val) if '.' in val else int(val)
+                    if num not in [-1, 0, 1, 2]:
+                        parent = path[-1] if path else None
+                        is_const = False
+                        if isinstance(parent, javalang.tree.VariableDeclarator):
+                            grandparent = path[-2] if len(path) > 1 else None
+                            if isinstance(grandparent, javalang.tree.FieldDeclaration):
+                                if "final" in grandparent.modifiers:
+                                    is_const = True
+                        if not is_const:
+                            line = node.position.line if node.position else 1
+                            findings.append({
+                                "id": "QLY-007",
+                                "title": "Magic Numbers Smell",
+                                "description": f"The literal numeric value '{val}' is used directly in expressions. Define it as a descriptive constant instead.",
+                                "language": "java",
+                                "severity": "Low",
+                                "category": "Code Smell",
+                                "line_number": line,
+                                "line": line,
+                                "code_snippet": get_snippet(line, line),
+                                "snippet": get_snippet(line, line),
+                                "explanation": f"Hardcoding literal '{val}' inside logic leaves developers guessing its significance.",
+                                "recommendation": "Declare a descriptive variable or static final constant to label this literal."
+                            })
+            except Exception:
+                pass
+
+        # E. Variable Declarator Checks
+        elif isinstance(node, javalang.tree.VariableDeclarator):
+            name = node.name
+            if len(name) <= 2 and name not in ["i", "j", "k", "x", "y", "z", "_"]:
+                line = node.position.line if node.position else 1
+                findings.append({
+                    "id": "QLY-008",
+                    "title": "Poor Naming Style (Short Variable)",
+                    "description": f"Variable name '{name}' is too short (length under 3 characters).",
+                    "language": "java",
+                    "severity": "Low",
+                    "category": "Code Smell",
+                    "line_number": line,
+                    "line": line,
+                    "code_snippet": f"{name} = ...",
+                    "snippet": f"{name} = ...",
+                    "explanation": "Variables with very short names do not explain their value, making logic difficult to digest.",
+                    "recommendation": "Replace short names with descriptive labels."
+                })
+
+    # Unused Imports Check
+    all_types_referenced = set()
+    for path, node in tree:
+        if isinstance(node, javalang.tree.ReferenceType):
+            all_types_referenced.add(node.name)
+        elif isinstance(node, javalang.tree.ClassCreator):
+            all_types_referenced.add(node.type.name)
+
+    for imp in tree.imports:
+        imp_class = imp.path.split(".")[-1]
+        if imp_class not in all_types_referenced:
+            line = imp.position.line if imp.position else 1
+            findings.append({
+                "id": "QLY-011",
+                "title": "Unused Import",
+                "description": f"Imported Java class '{imp.path}' is never referenced.",
+                "language": "java",
+                "severity": "Low",
+                "category": "Code Smell",
+                "line_number": line,
+                "line": line,
+                "code_snippet": f"import {imp.path};",
+                "snippet": f"import {imp.path};",
+                "explanation": "Unused imports clutter dependency scopes.",
+                "recommendation": "Remove the unused import statement."
+            })
+
     return findings
 
 def analyze_java_lexical(code: str) -> list:
     """Scan Java code blocks structurally and lexically to identify nesting, complexity, SOLID violations, and coding standard smells."""
+    try:
+        return analyze_java_ast(code)
+    except Exception as e:
+        import logging
+        logging.warning(f"Java AST parser failed: {e}. Falling back to lexical scan.")
+    
     findings = []
     lines = code.split("\n")
     total_lines = len(lines)
