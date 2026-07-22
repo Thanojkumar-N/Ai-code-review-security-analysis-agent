@@ -179,7 +179,7 @@ export const PasteCode: React.FC = () => {
                   language={language}
                   value={code}
                   theme="vs-dark"
-                  onChange={(val) => setCode(val || '')}
+                  onChange={(val: string | undefined) => setCode(val || '')}
                   options={{
                     minimap: { enabled: false },
                     fontSize: 13,

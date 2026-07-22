@@ -16,8 +16,7 @@ import {
   FolderOpen,
   Search,
   Filter,
-  AlertTriangle,
-  FileText
+  AlertTriangle
 } from 'lucide-react';
 
 interface ReportSummary {
@@ -95,7 +94,6 @@ export const Dashboard: React.FC = () => {
     : 100;
   
   const totalSecurity = findings.filter(f => f.category === 'Security').length;
-  const totalQuality = findings.filter(f => f.category === 'Code Quality').length;
 
   const criticalCount = findings.filter(f => f.severity === 'Critical').length;
   const highCount = findings.filter(f => f.severity === 'High').length;
@@ -348,7 +346,7 @@ export const Dashboard: React.FC = () => {
                 Submit raw code files to trace progress scores.
               </div>
             ) : (
-              reports.slice(-8).map((rep, idx) => (
+              reports.slice(-8).map((rep) => (
                 <div key={rep.id} className="flex-1 flex flex-col items-center gap-2 group cursor-pointer" onClick={() => navigate(`/results?report=${rep.id}`)}>
                   {/* Tooltip on hover */}
                   <span className="opacity-0 group-hover:opacity-100 transition-opacity text-[9px] bg-foreground text-background px-1.5 py-0.5 rounded font-bold">

@@ -5,7 +5,6 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../co
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import { 
-  Settings as SettingsIcon, 
   FolderPlus, 
   Database, 
   ShieldCheck, 

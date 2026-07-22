@@ -3,13 +3,9 @@ import { useParams, Link } from 'react-router-dom';
 import apiClient from '../api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import Button from '../components/ui/Button';
-import Select from '../components/ui/Select';
 import { 
   Folder, 
   Calendar, 
-  Terminal, 
-  Activity, 
-  Filter, 
   ArrowRight, 
   ChevronLeft, 
   ChevronRight,
@@ -37,10 +33,10 @@ interface SubmissionItem {
 
 interface PaginatedSubmissions {
   items: SubmissionItem[];
-  total: int;
-  page: int;
-  size: int;
-  pages: int;
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
 }
 
 export const ProjectDetails: React.FC = () => {

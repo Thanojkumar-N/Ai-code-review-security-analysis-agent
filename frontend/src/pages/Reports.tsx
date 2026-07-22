@@ -3,10 +3,8 @@ import { useAuth } from '../context/AuthContext';
 import apiClient from '../api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import Button from '../components/ui/Button';
-import Select from '../components/ui/Select';
 import { 
   BarChart4, 
-  Download, 
   FileText, 
   FileJson, 
   Table, 

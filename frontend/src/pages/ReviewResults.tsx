@@ -5,7 +5,6 @@ import apiClient from '../api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import { 
-  ShieldAlert, 
   Terminal, 
   ChevronRight, 
   AlertTriangle, 

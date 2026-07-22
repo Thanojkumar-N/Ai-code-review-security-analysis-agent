@@ -9,7 +9,6 @@ import Select from '../components/ui/Select';
 import { 
   FolderPlus, 
   Search, 
-  ArrowUpDown, 
   Trash2, 
   Edit3, 
   ChevronLeft, 
@@ -17,8 +16,7 @@ import {
   FolderOpen,
   Calendar,
   AlertTriangle,
-  CheckCircle2,
-  FileCode
+  CheckCircle2
 } from 'lucide-react';
 
 interface ProjectItem {
@@ -30,10 +28,10 @@ interface ProjectItem {
 
 interface PaginatedProjects {
   items: ProjectItem[];
-  total: int;
-  page: int;
-  size: int;
-  pages: int;
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
 }
 
 export const Projects: React.FC = () => {

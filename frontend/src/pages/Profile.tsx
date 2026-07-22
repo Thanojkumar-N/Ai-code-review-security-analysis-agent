@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
-import { User, ShieldAlert, CheckCircle2, AlertTriangle, Key } from 'lucide-react';
+import { User, CheckCircle2, AlertTriangle, Key } from 'lucide-react';
 
 export const Profile: React.FC = () => {
   const { user, updateProfilePassword } = useAuth();
